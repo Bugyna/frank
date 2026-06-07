@@ -1,138 +1,101 @@
 module Main (main) where
 
+import Pos
+import Token as T
+import Error as Err
 import Control.Exception
 
 
-data Pos = Pos {line :: Int, column :: Int} deriving (Eq, Ord)
-instance Show Pos where
-  show pos = show (line pos) ++ ":" ++ show (column pos)
-
-incrementLine :: Pos -> Pos
-incrementLine pos = pos {line = (line pos) + 1}
-incrementColumn :: Pos -> Pos
-incrementColumn pos = pos {column = (column pos) + 1}
-
-
-readLine :: String -> String
-readLine = takeWhile (\c -> c /= '\n')
-
-data FrankError = FrankError String Pos String
-
-instance Show FrankError where
-  show (FrankError reason pos text) =
-    let base_msg = (concat [reason, " ", show pos, "\n", text])
-    in base_msg++"\n"++(replicate (column pos) ' ')++"^ here"
-
-
-instance Exception FrankError
-
-
-alphabet :: [Char]
-alphabet = ['a'..'z'] ++ ['A' .. 'Z']
-numeric :: [Char]
-numeric = ['0' .. '9']
-alphanum :: [Char]
-alphanum = alphabet ++ numeric :: [Char]
-symbol_chars :: [Char]
-symbol_chars = alphanum ++ "<>=+-*&^%$#@!/_~?"
-
-symbol_starter_chars :: [Char]
-symbol_starter_chars = alphabet ++ "<>=+-*&^%$#@!/_~?"
-
-whitespace :: [Char]
-whitespace = " \n\r\t"
-
-separators :: [Char]
-separators = whitespace ++ "()"
-
-
-data LexUtilState = LexUtilState {token_curr_offset :: Int, token_start_offset :: Int, line_start_offset :: Int, start_pos :: Pos, curr_pos :: Pos, text :: String} deriving (Show)
-
-lexAdvance :: LexUtilState -> Char -> LexUtilState
-lexAdvance lexer@(LexUtilState _read _read_start _line_offset spos cpos _) c
-  | c == '\n' = lexer {token_curr_offset=_read+1, token_start_offset=_read_start+1, line_start_offset=_read+1, start_pos=incrementLine(spos), curr_pos=incrementLine(cpos)}
-  | otherwise = lexer {token_curr_offset=_read+1, token_start_offset=_read_start+1, start_pos=incrementColumn(spos), curr_pos=incrementColumn(cpos)}
-
-lexAdvanceInToken :: LexUtilState -> Char -> LexUtilState
-lexAdvanceInToken lexer@(LexUtilState _read _line_offset _ _ cpos _) c
-  | c == '\n' = lexer {token_curr_offset=_read+1, line_start_offset=_read+1, curr_pos=incrementLine(cpos)}
-  | otherwise = lexer {token_curr_offset=_read+1, curr_pos=incrementColumn(cpos)}
-
-lexTokenAck :: LexUtilState -> LexUtilState
-lexTokenAck lexer@(LexUtilState _read _read_start _line_offset _ cpos _) = 
-  lexer {token_curr_offset=_read, token_start_offset=_read, start_pos=cpos}
-
-
-
-data TokenKind = TNil | TSym | TNum | TStr | TLParen | TRParen deriving (Show, Eq)
-
-data Token =
-    Nil Pos
-  | Sym String Pos Pos
-  | Num String Pos Pos
-  | Str String Pos Pos
-  | LParen Pos
-  | RParen Pos
-    deriving (Show, Eq)
-
-
-emptyToken :: Token
-emptyToken = Nil (Pos (-1) (-1))
-
-createToken :: TokenKind -> String -> Pos -> Pos -> Token
-createToken state text startPos endPos =
-  constructor state text startPos endPos
-  where
-    constructor TSym = Sym
-    constructor TNum = Num
-    constructor TStr = Str
-    constructor _    = throw (FrankError "Noo:" startPos "Trying to create invalid token type")
-
-
-
-printTokens :: [Token] -> String
-printTokens [] = ""
-printTokens (h:[]) = show h
-printTokens (h:t) = show h ++ " " ++ printTokens t
-
-
-parseToken :: TokenKind -> [Char] -> LexUtilState -> [Char] -> [Token] -> [Token]
-parseToken state constr lexer "" ret
+parseText :: TokenKind -> [Char] -> LexUtilState -> [Char] -> [Token] -> [Token]
+parseText state constr lexer "" ret
   | state /= TNil = ret ++ [createToken state constr (start_pos lexer) (curr_pos lexer)]
   | otherwise    = ret
 
-parseToken TNil constr lexer text@(peek:rest) ret
-  | elem peek symbol_starter_chars = parseToken TSym constr lexer text ret
-  | elem peek numeric              = parseToken TNum constr lexer text ret
-  | peek == '"'                    = parseToken TStr constr lexer rest ret
-  | peek == '('                    = parseToken TNil constr (lexAdvance lexer peek) rest (ret ++ [LParen (curr_pos lexer)])
-  | peek == ')'                    = parseToken TNil constr (lexAdvance lexer peek) rest (ret ++ [RParen (curr_pos lexer)])
-  | otherwise                      = parseToken TNil constr (lexAdvance lexer peek) rest ret
+parseText TNil constr lexer text@(peek:rest) ret
+  | elem peek symbol_starter_chars = parseText TSym constr lexer text ret
+  | elem peek numeric              = parseText TNum constr lexer text ret
+  | peek == '"'                    = parseText TStr constr lexer rest ret
+  | peek == '('                    = parseText TNil constr (lexAdvance lexer peek) rest
+      (ret ++ [Token TLParen "(" (curr_pos lexer) (curr_pos lexer)])
+  | peek == ')'                    = parseText TNil constr (lexAdvance lexer peek) rest
+      (ret ++ [Token TRParen ")" (curr_pos lexer) (curr_pos lexer)])
+  | otherwise                      = parseText TNil constr (lexAdvance lexer peek) rest ret
 
 
-parseToken TStr constr lexer (peek:rest) ret
+parseText TStr constr lexer (peek:rest) ret
   | peek == '"'     = ret++[createToken TStr constr (start_pos lexer) (curr_pos lexer)]
   -- | peek == '\n'    = throw (FrankError "Unexpected EOL in string: " (start_pos lexer) constr)
-  | otherwise       = parseToken TStr (constr++[peek]) (lexAdvanceInToken lexer peek) rest ret
+  | otherwise       = parseText TStr (constr++[peek]) (lexAdvanceInToken lexer peek) rest ret
 
 
-parseToken state constr lexer@(LexUtilState curr_offset _ line_offset pos cpos orig_text) text@(peek:rest) ret
-  | elem peek (matching_chars state) = parseToken state (constr++[peek]) (lexAdvanceInToken lexer peek) rest ret
-  | elem peek separators             = parseToken TNil "" (lexTokenAck lexer) text (ret++[createToken state constr pos cpos])
+parseText state constr lexer@(LexUtilState curr_offset _ line_offset pos cpos orig_text) text@(peek:rest) ret
+  | elem peek (matching_chars state) = parseText state (constr++[peek]) (lexAdvanceInToken lexer peek) rest ret
+  | elem peek separators             = parseText TNil "" (lexTokenAck lexer) text (ret++[createToken state constr pos cpos])
   | otherwise                        = throw (FrankError "Invalid Char: " cpos (readLine $ drop line_offset orig_text))
   where matching_chars TSym   = symbol_chars
         matching_chars TNum   = numeric
         matching_chars _     = ""
 
 
-eval :: [Token] -> Token
-eval toks@(curr:rest) = 
+-- data ParserState = ParserState {offset :: Int, prev :: Token, curr :: Token}
+
+data ObjType =
+    TAtom
+  | TList
+    deriving (Show)
+
+data Obj =
+    Nil    {               token :: Token}
+  | Num    {num :: Int,    token :: Token}
+  | Str    {str :: String, token :: Token}
+  | Symbol {sym :: String, token :: Token}
+  | Expr   {list :: [Obj]}
+    deriving (Show)
+
+
+car :: Obj -> Obj
+car (Expr list) = head list
+car o = throw (FrankError ("Invalid type! Expected Cons got Atom [" ++ (show o) ++ "]\n") (start (token o)) (show o))
+
+
+parseTokens :: Obj -> [Token] -> Obj
+parseTokens o [] = o
+
+parseTokens (Main.Nil _) (peek:rest)
+  | (kind peek) == TLParen = parseTokens (Expr []) rest
+  | (kind peek) == TRParen = Main.Nil peek
+  | (kind peek) == TStr    = Str (content peek) peek
+  | (kind peek) == TSym    = Symbol (content peek) peek
+  | (kind peek) == TNum    = Num (read (content peek):: Int) peek
+  | otherwise = throw (FrankError "Trying to parse invalid state" (start peek) (content peek))
+
+
+parseTokens o@(Expr e) (peek:rest)
+  | (kind peek) == TLParen = (Expr $ e ++ [parseTokens (Expr []) rest])
+  | (kind peek) == TRParen = o
+  | (kind peek) == TStr    = parseTokens (Expr $ e ++ [Str (content peek) peek]) rest
+  | (kind peek) == TSym    = parseTokens (Expr $ e ++ [Symbol (content peek) peek]) rest
+  | (kind peek) == TNum    = parseTokens (Expr $ e ++ [Num (read (content peek):: Int) peek]) rest
+  | otherwise = throw (FrankError "Trying to parse invalid state" (start peek) (content peek))
+
+
+-- parseTokens (Num _ _) (peek:rest) = throw (FrankError "Trying to parse invalid state" (start peek) (content peek))
+-- parseTokens (Str _ _) (peek:rest) = throw (FrankError "Trying to parse invalid state" (start peek) (content peek))
+-- parseTokens (Symbol _ _) (peek:rest) = throw (FrankError "Trying to parse invalid state" (start peek) (content peek))
+-- parseTokens (Expr _) (peek:rest) = throw (FrankError "Trying to parse invalid state" (start peek) (content peek))
+
+
+
+
 
 main :: IO ()
 main = do
-  let text = "(let test-123 22a \"string test\")\n\
+  let text = "(let test-123 22 \"string test\")\n\
   \ (let another-expr (lambda (a b c) (body of sorts)))\n\
   \ " 
-  putStrLn $ (printTokens (parseToken TNil "" (LexUtilState 0 0 0 (Pos 1 0) (Pos 1 0) text) text []))
+  let toks = (parseText TNil "" (LexUtilState 0 0 0 (Pos 1 0) (Pos 1 0) text) text [])
+  putStrLn $ (printTokens toks)
+  putStrLn "   "
+  putStrLn $ (show $ parseTokens (Main.Nil (Token TNil "" (Pos 1 0) (Pos 1 0))) toks)
 
 
